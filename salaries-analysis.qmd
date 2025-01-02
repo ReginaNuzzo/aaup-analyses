@@ -1,0 +1,1337 @@
+---
+title: "AAUP salaries analysis"
+date: "Sept 2024"
+author: "Regina"
+format:
+  html:
+    toc: true
+    toc-expand: 2
+    self-contained: true
+    embed-resources: true
+    code-fold: show
+    code-tools: true
+    theme: simplex
+---
+
+# Preliminaries
+
+```{r}
+#| label: setup
+#| message: false
+
+library(tidyverse)
+library(readxl)
+library(ggthemes)
+library(scales)
+library(shades)
+library(ggstats)
+library(labelled)
+library(showtext)
+library(directlabels)
+library(hrbrthemes)
+library(ggbeeswarm)
+library(ggtext)
+library(gganimate)
+library(ggrepel)
+
+
+```
+
+Read in sheets separately with `readxl` package
+
+```{r}
+#| label: readin
+#| message: false
+
+sal_data <- "2023_GU-AAUP_1_salaries.xlsx"
+
+sal_summary <- read_xlsx(sal_data, sheet = "Summary")
+sal_dc <- read_xlsx(sal_data, sheet = "DC Area Institutions")
+sal_gu <- read_xlsx(sal_data, sheet = "Gallaudet University")
+
+```
+
+## colors
+
+```{r}
+#| label: aaup-colors
+
+
+# AAUP_RED 	= be0b40
+# GU_NAVY 	= 213a5e
+# GU_BLUE  	= 0f4d81
+# GU_BUFF 	=  efca77
+# GU_CREAM 	=  edebeb
+# GREEN 		= 008f00
+# AFT_BLUE	= 3C7DC0
+
+aaup_colors = c("#be0b40","#213a5e", "#0f4d81", "#efca77", "#edebeb", "#008f00",  "#3c7dc0")
+
+aaup_red = "#be0b40"
+gu_navy = "#213a5e"
+gu_blue = "#0f4d81" 
+gu_buff = "#efca77"
+gu_cream = "#edebeb"
+aaup_green = "#008f00"
+aft_blue = "#3c7dc0"
+
+fac_admin_colors <- c(aaup_green, aaup_red) # for comparing admin to faculty, set admin color first
+```
+
+Set a good background color for the text boxes
+
+```{r}
+#| label: colors-gradient
+
+# swatch(gradient(c(gu_buff, gu_cream),4))
+
+bg_mid <- gradient(c(gu_buff, gu_cream),4)[3]
+```
+
+## data wrangling
+
+Create object with local universities
+
+```{r}
+#| label: bind-local
+
+sal_local <- bind_rows(sal_dc, sal_gu)
+
+```
+
+Put specific university details here
+
+```{r}
+#| label: univ-details
+
+univ_id <- 131450
+univ_name <- "Gallaudet University"
+univ_name_short <- "Gallaudet"
+not_univ_name <- "Other DC University"
+```
+
+Create main dataset in long format (with one row for each job title). Select only specified ranks (eliminate staff, all ranks, and lecturer). Create variables:
+
+-   `univ`: home university vs other
+
+-   `fac_admin` for labeling faculty vs admin job
+
+-   `fac_admin_other` for labeling Gallaudet faculty vs Gallaudet admin vs other university. Add text labels and color styling (html).
+
+-   `job_label_color` for html-styled color labels for faculty vs admin
+
+```{r}
+#| label: make-long
+
+sal_local_long <- sal_local |>
+    select(name, contains("rpp_adjusted")) |> # choose geographically adjusted salaries
+    pivot_longer(
+        cols = !name,
+        names_to = "job",
+        names_prefix = "rpp_adjusted_salary_",
+        values_to = "salary"
+    ) |>
+      filter(!job %in% c("staff", "ar", "le")) |> # eliminate staff, all ranks, and lecturer
+    mutate(univ = if_else(name == univ_name, univ_name_short, not_univ_name)) |>
+    mutate(fac_admin = if_else(job == "admin", "admin", "fac")) |>
+    mutate(fac_admin_other = case_when((univ == univ_name_short &
+                                          job == "admin") ~  "admin",
+                                     (univ == univ_name_short &
+                                          job != "admin") ~ "fac",
+                                     univ != univ_name_short ~ "other"
+    )) |>
+    mutate(job = fct_relevel(job, c("admin", "pr", "ao", "ai", "in"))) |>
+    mutate(
+        job_label = case_when(
+            job == "admin" ~ "",
+            job == "pr" ~ "Professor",
+            job == "ao" ~ "Associate<br>Professor",
+            job == "ai" ~ "Assistant<br>Professor",
+            job == "in" ~ "Instructor"
+        )
+    ) |>
+    mutate(job_label_color = factor(
+        paste(
+            "<span style = 'color: ",
+            ifelse(job == "admin", aaup_green, aaup_red),
+            ";'>",
+            job_label,
+            "</span>",
+            sep = ""
+        )
+    )) |>
+    mutate(job_label_color = fct_relevel(
+        job_label_color,
+        c(
+            "<span style = 'color: #008f00;'></span>",
+            "<span style = 'color: #be0b40;'>Professor</span>",
+            "<span style = 'color: #be0b40;'>Associate<br>Professor</span>",
+            "<span style = 'color: #be0b40;'>Assistant<br>Professor</span>",
+            "<span style = 'color: #be0b40;'>Instructor</span>"
+        )
+    ))
+
+view(sal_local_long)
+```
+
+Create reverse rank function to get ranks of university salaries for each job title
+
+```{r}
+#| label: reverse-rank-function
+
+rev_rank <- function(x) {
+    dense_rank(desc(x))
+}
+```
+
+Create short dataset with descending salary ranks for each university within each position rank, where 1 = highest mean salary within
+
+```{r}
+#| label: ranks-for-each
+
+sal_local_ranks <- sal_local_long |> 
+    pivot_wider(id_cols = c(name, univ), names_from = job, values_from = salary) |> 
+    mutate(across(c(-name,-univ), rev_rank)) 
+
+view(sal_local_ranks)
+    
+```
+
+Summarize median salary for each job title. Create a table showing the difference between Gallaudet's salary and the local median, separately for each job title. Differences are in absolute numbers and percentages.
+
+```{r}
+#| label: diff-from-median-within-job
+
+median_sal <- sal_local_long |> 
+    group_by(job) |> 
+    summarize(median = median(salary, na.rm = T)) 
+
+diffs <- sal_local_long |> 
+    filter(name == univ_name) |> 
+    select(job, salary) |> 
+    full_join(median_sal) |> 
+    mutate(diff = salary - median) |> 
+    mutate(pct = diff/median*100)
+
+view(diffs)
+
+```
+
+## theming
+
+### fonts
+
+define fonts for theme
+
+```{r}
+
+#| label: font-add
+
+font_add("HN", regular = "helvetica-neue-5/HelveticaNeueMedium.otf", bold = "helvetica-neue-5/HelveticaNeueBold.otf" )
+showtext_auto()
+
+```
+
+### basic theme for scatterplots
+
+Tweaks may be needed
+
+```{r}
+#| label: theme-for-now
+
+
+theme_aaup_letter_salaries <- function() {
+    font <-  "HN"
+    base_family <- "HN"
+    theme_clean() %+replace%
+        theme(
+            plot.title = element_text(
+                family = "HN",
+                face = "bold",
+                size = 15 * scale_factor,
+                color = aaup_red
+                #   hjust = 0,
+                #  vjust = 2
+            ),
+            text = element_text(
+                family = "HN",
+                lineheight = 0.2,
+                size = 10 * scale_factor
+            ),
+            plot.subtitle = element_text(
+                family = font,
+                size = 10 * scale_factor,
+                hjust = 0.5,
+                margin = margin(t = 10, b = 5)
+            ),
+            plot.caption = element_text(
+                family = font,
+                size = 6 * scale_factor,
+                hjust = 1,
+                lineheight = ifelse(for_print == T, 0.2, 0.8), 
+                color = "grey55"
+            ),
+            plot.background = element_rect(fill = "#edebeb", color = NA),
+            axis.text.y = element_text(family = font, size = 10 * scale_factor),
+            axis.text.x = element_text(
+                family = font,
+                size = 8 * scale_factor,
+                lineheight = 0.2
+            ),
+            legend.position = "none",
+            aspect.ratio = 1,
+            panel.border = element_blank(),
+            panel.background = element_blank(),
+            axis.ticks.x = element_blank()
+            # plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm")
+            #  plot.margin = unit(c(.5,1,.5, 1), "cm")
+            # plot.margin = unit(c(1,1,1,1), "cm"),
+        )
+}
+```
+
+### basic theme for faceted plot
+
+Tweaks may be needed
+
+```{r}
+#| label: theme-faceted
+
+theme_aaup_letter_salaries_faceted <- function() {
+    font <-  "HN"
+    base_family <- "HN"
+    theme_clean() %+replace%
+        theme(
+            plot.title = element_text(
+                family = "HN",
+                face = "bold",
+                size = 15 * scale_factor,
+                #   hjust = 0,
+                #  vjust = 2
+            ),
+            strip.text.x = element_textbox(
+                box.color = "black",
+                size = 10 * scale_factor
+            ),
+            strip.background = element_blank(),
+            
+            
+            text = element_text(
+                family = "HN",
+                face = "bold",
+                lineheight = 0.2,
+                size = 10 * scale_factor
+            ),
+            plot.subtitle = element_text(
+                family = font,
+                size = 10 * scale_factor,
+                hjust = 0.5,
+                margin = margin(t = 10, b = 5)
+            ),
+            plot.caption = element_text(
+                family = font,
+                size = 6 * scale_factor,
+                hjust = 1,
+                lineheight = ifelse(for_print == T, 0.2, 0.8),
+                color = "grey55"
+            ),
+            plot.background = element_rect(fill = "#edebeb", color = NA),
+            axis.text.y = element_text(family = font, size = 10 * scale_factor),
+            axis.text.x = element_markdown(
+                family = font,
+                size = 10 * scale_factor,
+                lineheight = 0.2
+            ),
+            legend.position = "none",
+            #  aspect.ratio = 1,
+            panel.border = element_blank(),
+            panel.background = element_blank(),
+            axis.ticks.x = element_blank()
+            # plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm")
+            #  plot.margin = unit(c(.5,1,.5, 1), "cm")
+            # plot.margin = unit(c(1,1,1,1), "cm"),
+        )
+}
+```
+
+# Plots
+
+Get top salaries across institutions within each job category, for reference
+
+```{r}
+#| label: top-sal
+
+
+(top_sal <- sal_local_long |> 
+    group_by(job) |> 
+    summarize(top = max(salary, na.rm = T)))
+```
+
+Get Gallaudet's mean salary within each job category, give it ordering for plot. Join it with the ranks.
+
+```{r}
+#| label: univ-sal
+
+univ_sal <- sal_local_long |> 
+    filter(name == univ_name) |> 
+    mutate(plot_order = c(2, 3, 4, 5, 1)) |> 
+    arrange(plot_order)
+
+view(univ_sal)
+
+univ_ranks <- sal_local_ranks |> 
+    filter(name == univ_name) |> 
+    select(-univ) |> 
+    pivot_longer(-name, names_to = "job", values_to = "rank") |> 
+    inner_join(univ_sal)
+
+view(univ_ranks)
+```
+
+Set "minimum comfortable wage" for single and family
+
+Use <https://livingwage.mit.edu/>
+
+```{r}
+#| label: wages
+
+# set hourly wages from living wage calculator 
+
+living_wage_1 <- 27 # single living alone, no kids
+living_wage_2 <- 32.50 # for each of 2 earners with 2 kids
+
+# hourly wage * 2080 hours/per * 2 = minimum comfortable annual salary
+
+(comf_sal_1 <- living_wage_1 * 2080 * 2)
+
+(comf_sal_2 <- living_wage_2 * 2080 * 2)
+
+comf_sal_1_label <- "Salary needed for a single person in DC to live comfortably*"
+
+comf_sal_2_label <- "Salary needed for each of two earners in DC to raise two children comfortably*"
+
+
+```
+
+Shortened names for local universities
+
+```{r}
+#| label: name-short
+
+
+names_short <- c(
+    "American",
+    "Bowie State",
+    "George Mason",
+    "George Washington",
+    "Georgetown",
+    "Howard",
+    "Catholic",
+    "UMD College Park"
+)
+```
+
+## Main faceted plot
+
+Create overall plot of all job categories, faceted by admin vs faculty.
+
+```{r}
+#| label: all-faceted
+
+# select if for printing or screen (T is for print, F is for screen only)
+for_print <- F
+scale_factor <- ifelse(for_print == T, 4, 1)
+
+# fac_admin_colors <- c("#008f00", "#be0b40") # adjust if needed
+
+min_sal_lines <- tibble(
+    comf_sal = c(comf_sal_1, comf_sal_2),
+    place = c(1.5, 0.5),
+    comf_sal_type = c(1, 2),
+    label = c(
+        str_wrap(comf_sal_1_label, 15),
+        str_wrap(comf_sal_2_label, 15)
+    ),
+    fac_admin = c("fac", "fac")
+)
+
+rank_labels = data.frame(
+    label = c(
+        "4th highest out of 9",
+        "9th out of 9",
+        "8th out of 9",
+        "9th out of 9",
+        "7th out of 9"
+    ),
+    fac_admin = c("admin", rep("fac", 4)),
+    job = c("admin", "pr", "ao", "ai", "in"),
+    sal = univ_sal$salary
+) # For now, put in the labels by hand -- fix up later to automate
+
+facet_labels <- c(admin = "Administration", fac = "Faculty")
+
+color_text <- data.frame(fac_admin = "fac", text = "Gallaudet administration in<span style = 'color:#008f00'> green </span> <br> Gallaudet faculty in<span style = 'color:#b30b40'> red </span> <br>Local peer institutions in<span style = 'color:gray45;'> gray </span>")
+
+
+sal_local_long |>
+    ggplot() +
+    geom_hline(yintercept = comf_sal_1,
+               linewidth = .25,
+               color = aaup_red) +
+    geom_hline(yintercept = comf_sal_2,
+               linewidth = .25,
+               color = aaup_red) +
+    geom_point(
+        aes(
+            x = job_label_color,
+            y = salary,
+            alpha = univ,
+            size = univ,
+            color = univ,
+            shape = univ,
+            fill = fac_admin_other
+        )
+    ) +
+    facet_grid(
+        cols = vars(fac_admin),
+        switch = "x",
+        scales = "free",
+        space = "free",
+        labeller = labeller(.cols = as_labeller(
+            ~ glue::glue("<span style='color: {fac_admin_colors};'> {facet_labels} </span>")
+        ))
+    ) +
+    
+# tweak these parameters
+    
+    scale_alpha_manual(values = c(0.75, 0.5)) +
+    scale_size_manual(values = c(10, 10)) +
+    scale_color_manual(values = c("gray20", "gray20")) +
+    # scale_shape_manual(values  = c(15, 16)) +
+    scale_shape_manual(values  = c(22, 21)) +
+    # scale_color_manual(values = c(aaup_green, aaup_red,"gray45" )) +
+    scale_fill_manual(values = c(aaup_green, aaup_red, "gray45")) +
+    
+# might need to expand graphic limits
+    
+    expand_limits(x = 0.25) +
+    
+    labs(
+        title = str_wrap("Average Salaries at Peer DC Universities, 2023", 50),
+        x = "",
+        y = "",
+        
+        caption = str_wrap(
+            "*calculated from MIT Living Wage Calculator and 50/30/20 budgeting principle. Salary data from the US Department of Education's Integrated Postsecondary Education Data System and National AAUP’s Faculty Compensation Survey",
+            80
+        )
+    ) +
+    
+    geom_richtext(
+        aes(x = 2, y = 265000, label = text),
+        data = color_text,
+        size = 3.9 * scale_factor,
+        lineheight = 0.3,
+        label.color = "black",
+        fill = NA,
+        fontface = "bold"
+    ) +
+    
+    theme_aaup_letter_salaries_faceted() +
+    
+    scale_y_continuous(
+        labels = scales::label_currency(scale_cut = cut_short_scale()),
+        limits = c(34000, 278000), # tweak limits
+        breaks = seq(50000, 250000, 50000)
+    ) +
+    
+    coord_cartesian(clip = "off") +
+    
+    # lots of tweaks needed to the following
+    geom_label_repel(
+        aes(x = place  , y = comf_sal, label = label),
+        fill = "white",
+        data = min_sal_lines,
+        size = 3.0 * scale_factor,
+       lineheight = ifelse(for_print == T, 0.2, 0.8),
+        min.segment.length = 0.0,
+        arrow = arrow(angle = 20, length = unit(0.01, "npc")),
+        seed = 123,
+        label.padding = 0.25,
+        color = aaup_red,
+        nudge_y = ifelse(min_sal_lines$comf_sal_type == 2, -48000, -65000),
+        nudge_x = ifelse(min_sal_lines$comf_sal_type == 1, -0.35, -0.3),
+        segment.size = 0.25,
+        segment.curvature = 0.7,
+        segment.angle = 20,
+        
+        xlim = c(-Inf, Inf)
+    )  +
+    
+    geom_text(
+        aes(
+            x = job_label_color,
+            y = salary,
+            label = paste0(rank, "th")
+        ),
+        data = filter(univ_ranks, fac_admin == "fac") ,
+        size = 3.5 * scale_factor,
+        color = "white",
+        fontface = "bold"
+    ) +
+    geom_text(
+        aes(
+            x = job_label_color,
+            y = salary,
+            label = paste0(rank, "th") # make sure this lazy paste is grammatically correct
+        ),
+        data = filter(univ_ranks, fac_admin == "admin"),
+        color = "white",
+        size = 3.5 * scale_factor,
+        fontface = "bold"
+    )
+
+# # uncomment me to save plot
+# ggsave("all_faceted.png",
+#        dpi = 400,
+#        width = 5,
+#        height = 5)
+```
+
+## Admin only
+
+Create scatterplot for just admin, with extra text box. Might need lots of tweaks.
+
+```{r}
+#| label: admin
+
+# select if for printing or screen (T is for print, F is for screen only)
+for_print <- F
+scale_factor <- ifelse(for_print == T, 4, 1)
+
+place_for_boxes <- c(0.99, 0.7) # tweak x-axis values to fit
+
+min_sal_lines <- tibble(
+    comf_sal = c(comf_sal_1, comf_sal_2),
+    place = place_for_boxes, 
+    comf_sal_type = c(1, 2),
+    label = c(
+        str_wrap(comf_sal_1_label, 15),
+        str_wrap(comf_sal_2_label, 17) #tweak to fit
+    )
+)
+
+sal_local_long |>
+    filter(job == "admin") |>
+  arrange(desc(univ), name) |> 
+    ggplot() +
+    geom_hline(yintercept = comf_sal_1,
+               linewidth = .25,
+               color = aaup_red) +
+    geom_hline(yintercept = comf_sal_2,
+               linewidth = .25,
+               color = aaup_red) +
+    geom_point(aes(
+        x = job,
+        y = salary,
+        alpha = univ,
+        size = univ,
+        color = univ,
+        shape = univ,
+        fill = univ
+    )) +
+    
+    scale_alpha_manual(values = c(0.95, 0.7)) +
+    scale_size_manual(values = c(7, 7)) +
+    scale_color_manual(values = c(gu_buff, "grey20")) +
+    scale_shape_manual(values  = c(22, 21)) +
+    scale_fill_manual(values = c(aaup_green, "grey20")) +
+    theme_aaup_letter_salaries() +
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank()) +
+    scale_y_continuous(
+        labels = scales::label_currency(scale_cut = cut_short_scale()),
+        limits = c(50000, 270000),
+        breaks = seq(50000, 250000, 50000)
+    ) +
+    expand_limits(x = .15) +
+    labs(
+        title = "Administrators",
+        subtitle = "Average Salaries at Local Universities, 2023"        ,
+        x = "",
+        y = "",
+        caption = str_wrap(
+            "*calculated from MIT Living Wage Calculator and 50/30/20 budgeting principle. Salary data from the US Department of Education's Integrated Postsecondary Education Data System and National AAUP’s Faculty Compensation Survey",
+            80
+        )
+    ) +
+    geom_text_repel(
+        aes(x = job, y = salary, label = names_short),
+        direction = "y",
+        hjust = 0,
+        box.padding = .3,
+        point.padding = 1,
+        segment.alpha = 0.25,
+        force = 2,
+        # seed = 15,
+        seed = 17,
+        data = filter(sal_local_long, univ != "Gallaudet" &
+                          job == "admin"),
+        size = 4 * scale_factor,
+        nudge_x = 0.1
+    )  +
+    geom_text_repel(
+        aes(x = job, y = salary, label = "Gallaudet"),
+        color = aaup_red,
+        data = filter(sal_local_long, univ == "Gallaudet", job == "admin"),
+        nudge_x = -.17,
+        direction = "x",
+        point.padding = 5,
+        size = 4 * scale_factor
+    ) +
+    geom_richtext(
+        label = "<span style = 'color:black'> Gallaudet Administrators <br> rank </span>**4th highest out of 9**<br> <span style = 'color:black'> local university salaries, </span> <br>**$8,000 ABOVE the median**",
+        x = .6,
+        y = 225000,
+        color = aaup_red,
+        fill = bg_mid,
+        lineheight = .3,
+        size = ifelse(for_print == T, 16, 4)
+    )  +
+    
+    annotate(
+        "curve",
+        x = 0.65,
+        y = 199900,
+        xend = 0.70,
+        yend = 165000,
+        arrow = arrow(angle = 20, length = unit(0.01, "npc")),
+        color = aaup_red,
+        angle = 90,
+        curvature = .4,
+        linewidth = 0.4
+    ) +
+    
+    geom_label_repel(
+        aes(x = place - 0.15 , y = comf_sal),
+        label = min_sal_lines$label,
+        fill = "white",
+        data = min_sal_lines,
+        size = 3.25 * scale_factor,
+        lineheight = ifelse(for_print == T, 0.2, 0.8),
+        min.segment.length = 0.0,
+        arrow = arrow(angle = 20, length = unit(0.01, "npc")),
+        seed = 123,
+        label.padding = 0.25,
+        # color = aaup_red,
+        color = "black",
+        nudge_y = ifelse(min_sal_lines$comf_sal_type == 1, -45000, -53000),
+        nudge_x = ifelse(min_sal_lines$comf_sal_type == 1, -0.1, -0.1),
+        segment.size = 0.25,
+        segment.curvature = ifelse(min_sal_lines$comf_sal_type == 1, 0.7, 0.7),
+        segment.angle = ifelse(min_sal_lines$comf_sal_type == 1, 20, 20),
+        segment.ncp = 3,
+        segment.inflect = FALSE
+    )
+
+
+## uncomment me to save plot
+#
+# ggsave(
+#     "admin_scatter.png",
+#     dpi = 400,
+#     width = 5,
+#     height = 5
+# )
+
+```
+
+## Full professors only
+
+Same for full professors only
+
+```{r}
+#| label: prof
+
+# select if for printing or screen (T is for print, F is for screen only)
+for_print <- F
+scale_factor <- ifelse(for_print == T, 4, 1)
+
+place_for_boxes <- c(0.92, 0.7) #tweak
+
+min_sal_lines <- tibble(
+    comf_sal = c(comf_sal_1, comf_sal_2), 
+    comf_sal_type = c(1, 2),
+    place = place_for_boxes,
+ label = c(
+        str_wrap(comf_sal_1_label, 15),
+        str_wrap(comf_sal_2_label, 17)
+))
+
+sal_local_long |>
+    filter(job == "pr") |>
+    arrange(desc(univ), name) |> 
+    ggplot() +
+    geom_hline(yintercept = 112320,
+               linewidth = .25,
+               color = aaup_red) +
+    geom_hline(yintercept = 135200,
+               linewidth = .25,
+               color = aaup_red) +
+    geom_point(aes(
+        x = job,
+        y = salary,
+        alpha = univ,
+        size = univ,
+        color = univ,
+        shape = univ,
+        fill = univ
+    )) +
+    
+    scale_alpha_manual(values = c(0.95, 0.7)) +
+    scale_size_manual(values = c(7, 7)) +
+    scale_color_manual(values = c(gu_buff, "grey20")) +
+    scale_shape_manual(values  = c(22, 21)) +
+    scale_fill_manual(values = c(aaup_red, "grey20")) +
+    theme_aaup_letter_salaries() +
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank()) +
+    scale_y_continuous(
+        labels = scales::label_currency(scale_cut = cut_short_scale()),
+        limits = c(50000, 270000),
+        breaks = seq(50000, 250000, 50000)
+    ) +
+    
+    expand_limits(x = -.01) +
+    labs(
+        title = "Full Professors",
+        subtitle = "Average Salaries at Local Universities, 2023"        ,
+        x = "",
+        y = "",
+        caption = str_wrap(
+            "*calculated from MIT Living Wage Calculator and 50/30/20 budgeting principle. Salary data from the US Department of Education's Integrated Postsecondary Education Data System and National AAUP’s Faculty Compensation Survey",
+            80
+        )
+        
+    ) +
+    geom_text_repel(
+        aes(x = job, y = salary, label = names_short),
+        direction = "y",
+        box.padding = 0.3,
+        point.padding = .5,
+        segment.alpha = 0.25,
+        force = 1,
+        hjust = 0,
+        seed = 14,
+        data = filter(sal_local_long, univ != "Gallaudet" &
+                          job == "pr"),
+        size = 4 * scale_factor,
+        nudge_x = 0.1,
+        nudge_y = 7000,
+        xlim = c(1, NA)
+    )  +
+    geom_text_repel(
+        aes(x = job, y = salary, label = "Gallaudet"),
+        color = aaup_red,
+        data = filter(sal_local_long, univ == "Gallaudet", job == "pr"),
+        nudge_x = -.19,
+        nudge_y = -500,
+        direction = "x",
+        point.padding = 5,
+        size = 4 * scale_factor, 
+        lineheight = ifelse(for_print == T, 0.2, 0.8)
+    ) +
+    geom_richtext(
+        #       label = "Gallaudet Full Professors<br> rank **9th out of 9**  \nlocal university salaries,<br>**$43,000 BELOW the median**",
+        label = "<span style = 'color:black'> Gallaudet Full Professors <br> rank </span>**9th out of 9**<br> <span style = 'color:black'> local university salaries, </span> <br>**$43,000 BELOW the median**",
+        x = .48,
+        y = 225000,
+        color = aaup_red,
+        fill = bg_mid,
+        lineheight = 0.3,
+        size = ifelse(for_print == T, 16, 4)
+    )  +
+    
+    annotate(
+        "curve",
+        x = 0.5,
+        y = 199900,
+        xend = 0.67,
+        yend = 120000,
+        arrow = arrow(angle = 20, length = unit(0.01, "npc")),
+        color = aaup_red,
+        angle = 130,
+        curvature = .4,
+        linewidth = 0.4
+    ) +
+    
+    geom_label_repel(
+        aes(x = place - 0.3, y = comf_sal),
+        label = min_sal_lines$label,
+        fill = "white",
+        data = min_sal_lines,
+        size = 3.25 * scale_factor,
+        lineheight = ifelse(for_print == T, 0.2, 0.8), 
+        min.segment.length = 0.0,
+        arrow = arrow(angle = 20, length = unit(0.01, "npc")),
+        seed = 123,
+        label.padding = 0.25,
+        #  color = aaup_red,
+        nudge_y = ifelse(min_sal_lines$comf_sal_type == 1, -37000, -51000),
+        nudge_x = ifelse(min_sal_lines$comf_sal_type == 1, -0.11, -0.1),
+        segment.size = 0.25,
+        segment.curvature = ifelse(min_sal_lines$comf_sal_type == 1, 0.7, 0.7),
+        segment.angle = ifelse(min_sal_lines$comf_sal_type == 1, 20, 20),
+        segment.ncp = 3,
+        segment.inflect = FALSE
+    )
+
+
+# # uncomment me to save plot
+# 
+# ggsave("prof_scatter.png",
+#        dpi = 400,
+#        width = 5,
+#        height = 5)
+
+```
+
+## Associate professors only
+
+```{r}
+#| label: assoc
+
+# select if for printing or screen (T is for print, F is for screen only)
+for_print <- F
+scale_factor <- ifelse(for_print == T, 4, 1)
+
+place_for_boxes <- c(0.5, 0.2) #tweak
+
+min_sal_lines <- tibble(
+    comf_sal = c(comf_sal_1, comf_sal_2), 
+    comf_sal_type = c(1, 2),
+    place = place_for_boxes,
+ label = c(
+        str_wrap(comf_sal_1_label, 15),
+        str_wrap(comf_sal_2_label, 17)
+))
+
+
+
+sal_local_long |>
+    filter(job == "ao") |>
+    arrange(desc(univ), name) |> 
+    ggplot() +
+    geom_hline(yintercept = 112320,
+               linewidth = .25,
+               color = aaup_red) +
+    geom_hline(yintercept = 135200,
+               linewidth = .25,
+               color = aaup_red) +
+    geom_point(aes(
+        x = job,
+        y = salary,
+        alpha = univ,
+        size = univ,
+        color = univ,
+        shape = univ,
+        fill = univ
+    )) +
+    
+    scale_alpha_manual(values = c(0.95, 0.7)) +
+    scale_size_manual(values = c(7, 7)) +
+    scale_color_manual(values = c(gu_buff, "grey20")) +
+    scale_shape_manual(values  = c(22, 16)) +
+    scale_fill_manual(values = c(aaup_red, "grey20")) +
+    theme_aaup_letter_salaries() +
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank()) +
+    scale_y_continuous(
+        labels = scales::label_currency(scale_cut = cut_short_scale()),
+        limits = c(50000, 270000),
+        breaks = seq(50000, 250000, 50000)
+    ) +
+    
+    expand_limits(x = .04) +
+    labs(
+        title = "Associate Professors",
+        subtitle = "Average Salaries at Local Universities, 2023"        ,
+        x = "",
+        y = "",
+        caption = str_wrap(
+            "*calculated from MIT Living Wage Calculator and 50/30/20 budgeting principle. Salary data from the US Department of Education's Integrated Postsecondary Education Data System and National AAUP’s Faculty Compensation Survey",
+            80
+        )
+    ) +
+    geom_text_repel(
+        aes(x = job, y = salary, label = names_short),
+        direction = "y",
+        box.padding = 0.3,
+        point.padding = .5,
+        segment.alpha = 0.25,
+        force = 1,
+        hjust = 0,
+        seed = 14,
+        data = filter(sal_local_long, univ != "Gallaudet" &
+                          job == "ao"),
+        size = 4 * scale_factor,
+        nudge_x = 0.1,
+        nudge_y = 26500,
+        xlim = c(1, NA)
+    )  +
+    geom_text_repel(
+        aes(x = job, y = salary, label = "Gallaudet"),
+        color = aaup_red,
+        data = filter(sal_local_long, univ == "Gallaudet", job == "ao"),
+        nudge_x = -.19,
+        nudge_y = -500,
+        direction = "x",
+        point.padding = 5,
+        size = 4 * scale_factor
+    ) +
+    geom_richtext(
+        label = "<span style = 'color:black'> Gallaudet Associate Professors <br> rank </span>**8th out of 9**<br> <span style = 'color:black'> local university salaries, </span> <br>**$18,000 BELOW the median**",
+        x = .52,
+        y = 225000,
+        color = aaup_red,
+        fill = bg_mid,
+        lineheight = .3,
+        size = ifelse(for_print == T, 16, 4)
+    )  +
+    
+    
+    annotate(
+        "curve",
+        x = 0.6,
+        y = 199900,
+        xend = 0.67,
+        yend = 95000,
+        arrow = arrow(angle = 20, length = unit(0.01, "npc")),
+        color = aaup_red,
+        angle = 130,
+        curvature = .4,
+        linewidth = 0.4
+    ) +
+    
+    geom_label_repel(
+        aes(x = place , y = comf_sal),
+        label = min_sal_lines$label,
+        fill = "white",
+        data = min_sal_lines,
+        size = 3.25 * scale_factor,
+        lineheight = ifelse(for_print == T, 0.2, 0.8), 
+        min.segment.length = 0.0,
+        arrow = arrow(angle = 20, length = unit(0.01, "npc")),
+        seed = 123,
+        label.padding = 0.25,
+        #  color = aaup_red,
+        nudge_y = ifelse(min_sal_lines$comf_sal_type == 1, -45000, -55000),
+        nudge_x = ifelse(min_sal_lines$comf_sal_type == 1, 0, 0),
+        segment.size = 0.25,
+        segment.curvature = ifelse(min_sal_lines$comf_sal_type == 1, -0.4, -0.4),
+        segment.angle = ifelse(min_sal_lines$comf_sal_type == 1, 40, 40),
+        segment.ncp = 3,
+        segment.inflect = FALSE
+    )
+
+
+# # uncomment me to save plot
+# 
+# ggsave(
+#     "assoc_scatter.png",
+#     dpi = 400,
+#     width = 5,
+#     height = 5
+# )
+```
+
+## Assistant profs only
+
+```{r}
+#| label: asst
+
+# select if for printing or screen (T is for print, F is for screen only)
+for_print <- F
+scale_factor <- ifelse(for_print == T, 4, 1)
+
+place_for_boxes <- c(0.55, 0.3) #tweak
+
+min_sal_lines <- tibble(
+    comf_sal = c(comf_sal_1, comf_sal_2), 
+    comf_sal_type = c(1, 2),
+    place = place_for_boxes,
+ label = c(
+        str_wrap(comf_sal_1_label, 15),
+        str_wrap(comf_sal_2_label, 17)
+))
+
+sal_local_long |>
+    filter(job == "ai") |>
+    arrange(desc(univ), name) |> 
+    ggplot() +
+    geom_hline(yintercept = 112320,
+               linewidth = .25,
+               color = aaup_red) +
+    geom_hline(yintercept = 135200,
+               linewidth = .25,
+               color = aaup_red) +
+    geom_point(aes(
+        x = job,
+        y = salary,
+        alpha = univ,
+        size = univ,
+        color = univ,
+        shape = univ,
+        fill = univ
+    )) +
+    
+    scale_alpha_manual(values = c(.95, 0.7)) +
+    scale_size_manual(values = c(7, 7)) +
+    scale_color_manual(values = c(gu_buff, "grey20")) +
+    scale_shape_manual(values  = c(22, 16)) +
+    scale_fill_manual(values = c(aaup_red, "grey20")) +
+    theme_aaup_letter_salaries() +
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank()) +
+    scale_y_continuous(
+        labels = scales::label_currency(scale_cut = cut_short_scale()),
+        limits = c(50000, 270000),
+        breaks = seq(50000, 250000, 50000)
+    ) +
+    
+    expand_limits(x = 0.05) +
+    labs(
+        title = "Assistant Professors",
+        subtitle = "Average Salaries at Local Universities, 2023"        ,
+        x = "",
+        y = "",
+        caption = str_wrap(
+            "*calculated from MIT Living Wage Calculator and 50/30/20 budgeting principle. Salary data from the US Department of Education's Integrated Postsecondary Education Data System and National AAUP’s Faculty Compensation Survey",
+            80
+        )
+    ) +
+    geom_text_repel(
+        aes(x = job, y = salary, label = names_short),
+        direction = "y",
+        box.padding = 0.3,
+        point.padding = .5,
+        segment.alpha = 0.25,
+        force = 1,
+        hjust = 0,
+        seed = 14,
+        data = filter(sal_local_long, univ != "Gallaudet" &
+                          job == "ai"),
+        size = 4 * scale_factor,
+        nudge_x = 0.1,
+        nudge_y = 30000,
+        xlim = c(1, NA)
+    )  +
+    geom_text_repel(
+        aes(x = job, y = salary, label = "Gallaudet"),
+        color = aaup_red,
+        data = filter(sal_local_long, univ == "Gallaudet", job == "ai"),
+        nudge_x = -.17,
+        nudge_y = -500,
+        direction = "x",
+        point.padding = 5,
+        size = 4 * scale_factor
+    ) +
+    geom_richtext(
+        label = "<span style = 'color:black'> Gallaudet Assistant Professors <br> rank </span>**9th out of 9** <br> <span style = 'color:black'> local university salaries, </span> <br>**$17,000 BELOW the median**",
+        x = .6,
+        y = 225000,
+        color = aaup_red,
+        fill = bg_mid,
+        lineheight = .3,
+        size = ifelse(for_print == T, 16, 4)
+    )  +
+    
+    
+    annotate(
+        "curve",
+        x = 0.7,
+        y = 199900,
+        xend = 0.69,
+        yend = 82000,
+        arrow = arrow(angle = 20, length = unit(0.01, "npc")),
+        color = aaup_red,
+        angle = 130,
+        curvature = .3,
+        linewidth = 0.4
+    ) +
+    
+    geom_label_repel(
+        aes(x = place , y = comf_sal),
+        label = min_sal_lines$label,
+        fill = "white",
+        data = min_sal_lines,
+        size = 3.25 * scale_factor,
+        lineheight = ifelse(for_print == T, 0.2, 0.8),
+        min.segment.length = 0.0,
+        arrow = arrow(angle = 20, length = unit(0.01, "npc")),
+        seed = 123,
+        label.padding = 0.22,
+        # color = aaup_red,
+        force = 1,
+        nudge_y = ifelse(min_sal_lines$comf_sal_type == 1, -50500, -40000),
+        nudge_x = ifelse(min_sal_lines$comf_sal_type == 1, -0.248, 0),
+        segment.size = 0.25,
+        segment.curvature = ifelse(min_sal_lines$comf_sal_type == 1, 0.4, 0.4),
+        segment.angle = ifelse(min_sal_lines$comf_sal_type == 1, 40, 40),
+        segment.ncp = 5,
+        segment.inflect = FALSE
+    )
+
+
+
+# # uncomment me to save plot
+# 
+# ggsave("asst_scatter.png",
+#        dpi = 400,
+#        width = 5,
+#        height = 5)
+```
+
+## Instructors only
+
+```{r}
+#| label: instructor
+
+# select if for printing or screen (T is for print, F is for screen only)
+for_print <- F
+scale_factor <- ifelse(for_print == T, 4, 1)
+
+place_for_boxes <- c(0.45, 0.2) #tweak
+
+min_sal_lines <- tibble(
+    comf_sal = c(comf_sal_1, comf_sal_2), 
+    comf_sal_type = c(1, 2),
+    place = place_for_boxes,
+ label = c(
+        str_wrap(comf_sal_1_label, 15),
+        str_wrap(comf_sal_2_label, 17)
+))
+
+sal_local_long |>
+    filter(job == "in") |>
+    arrange(desc(univ), name) |> 
+    ggplot() +
+    geom_hline(yintercept = 112320,
+               linewidth = .25,
+               color = aaup_red) +
+    geom_hline(yintercept = 135200,
+               linewidth = .25,
+               color = aaup_red) +
+    geom_point(aes(
+        x = job,
+        y = salary,
+        alpha = univ,
+        size = univ,
+        color = univ,
+        shape = univ,
+        fill = univ
+    )) +
+    
+    
+    scale_alpha_manual(values = c(0.95, .7)) +
+    scale_size_manual(values = c(7, 7)) +
+    scale_color_manual(values = c(gu_buff, "grey20")) +
+    scale_shape_manual(values  = c(22, 16)) +
+    scale_fill_manual(values = c(aaup_red, "grey20")) +
+    theme_aaup_letter_salaries() +
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank()) +
+    scale_y_continuous(
+        labels = scales::label_currency(scale_cut = cut_short_scale()),
+        limits = c(50000, 270000),
+        breaks = seq(50000, 250000, 50000)
+    ) +
+    
+    expand_limits(x = -0.05) +
+    labs(
+        title = "Instructors",
+        subtitle = "Average Salaries at Local Universities, 2023"        ,
+        x = "",
+        y = "",
+        caption = str_wrap(
+            "*calculated from MIT Living Wage Calculator and 50/30/20 budgeting principle. Salary data from the US Department of Education's Integrated Postsecondary Education Data System and National AAUP’s Faculty Compensation Survey",
+            80
+        )
+    ) +
+    geom_text_repel(
+        aes(x = job, y = salary, label = names_short),
+        direction = "y",
+        box.padding = 0.3,
+        point.padding = .5,
+        segment.alpha = 0.25,
+        force = 1,
+        hjust = 0,
+        seed = 14,
+        data = filter(sal_local_long, univ != "Gallaudet" &
+                          job == "in"),
+        size = 4 * scale_factor,
+        nudge_x = 0.1,
+        nudge_y = 30000,
+        xlim = c(1, NA)
+    )  +
+    geom_text_repel(
+        aes(x = job, y = salary, label = "Gallaudet"),
+        color = aaup_red,
+        data = filter(sal_local_long, univ == "Gallaudet", job == "in"),
+        nudge_x = -.195,
+        nudge_y = -500,
+        direction = "x",
+        point.padding = 5,
+        size = 4 * scale_factor
+    ) +
+    geom_richtext(
+        label = "<span style = 'color:black'> Gallaudet Instructors <br> rank </span>**7th out of 9** <br> <span style = 'color:black'> local university salaries, </span> <br>**$9,000 BELOW the median**",
+        x = .5,
+        y = 225000,
+        color = aaup_red,
+        fill = bg_mid,
+        lineheight = .3,
+        size = ifelse(for_print == T, 16, 4)
+    )  +
+    
+    
+    annotate(
+        "curve",
+        x = 0.6,
+        y = 199900,
+        xend = 0.65,
+        yend = 76000,
+        arrow = arrow(angle = 20, length = unit(0.01, "npc")),
+        color = aaup_red,
+        angle = 130,
+        curvature = .35,
+        linewidth = 0.4
+    ) +
+    
+    geom_label_repel(
+        aes(x = place , y = comf_sal),
+        label = min_sal_lines$label,
+        fill = "white",
+        data = min_sal_lines,
+        size = 3.25 * scale_factor,
+        lineheight = ifelse(for_print == T, 0.2, 0.8), 
+        min.segment.length = 0.0,
+        arrow = arrow(angle = 20, length = unit(0.01, "npc")),
+        seed = 123,
+        label.padding = 0.22,
+        #  color = aaup_red,
+        force = 1,
+        nudge_y = ifelse(min_sal_lines$comf_sal_type == 1, -4500, -40000),
+        nudge_x = ifelse(min_sal_lines$comf_sal_type == 1, -0.25, 0),
+        segment.size = 0.25,
+        segment.curvature = ifelse(min_sal_lines$comf_sal_type == 1, 0.2, -0.4),
+        segment.angle = ifelse(min_sal_lines$comf_sal_type == 1, 120, 0),
+        segment.ncp = 5,
+        segment.inflect = FALSE
+    )
+
+
+# # uncomment me to save plot
+# 
+# ggsave(
+#     "instructor_scatter.png",
+#     dpi = 400,
+#     width = 5,
+#     height = 5
+# )
+```
